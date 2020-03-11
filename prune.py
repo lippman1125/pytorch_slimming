@@ -24,10 +24,11 @@ parser.add_argument('--save', default='', type=str, metavar='PATH',
                     help='path to save prune model (default: none)')
 args = parser.parse_args()
 args.cuda = not args.no_cuda and torch.cuda.is_available()
+device = torch.device("cuda" if args.cuda else "cpu")
 
 model = vgg()
-if args.cuda:
-    model.cuda()
+model.to(device)
+
 if args.model:
     if os.path.isfile(args.model):
         print("=> loading checkpoint '{}'".format(args.model))
@@ -45,6 +46,7 @@ total = 0
 for m in model.modules():
     if isinstance(m, nn.BatchNorm2d):
         total += m.weight.data.shape[0]
+        print(m.weight.data.shape)
 
 bn = torch.zeros(total)
 index = 0
@@ -53,7 +55,7 @@ for m in model.modules():
         size = m.weight.data.shape[0]
         bn[index:(index+size)] = m.weight.data.abs().clone()
         index += size
-
+# print(bn)
 y, i = torch.sort(bn)
 thre_index = int(total * args.percent)
 thre = y[thre_index]
@@ -64,6 +66,7 @@ cfg_mask = []
 for k, m in enumerate(model.modules()):
     if isinstance(m, nn.BatchNorm2d):
         weight_copy = m.weight.data.clone()
+        # to be reserved channel is one, to be removed channel is zero
         mask = weight_copy.abs().gt(thre).float().cuda()
         pruned = pruned + mask.shape[0] - torch.sum(mask)
         m.weight.data.mul_(mask)
@@ -76,7 +79,7 @@ for k, m in enumerate(model.modules()):
         cfg.append('M')
 
 pruned_ratio = pruned/total
-
+print("pruned_ratio = {}".format(pruned_ratio))
 print('Pre-processing Successful!')
 
 
@@ -91,11 +94,12 @@ def test():
     model.eval()
     correct = 0
     for data, target in test_loader:
-        if args.cuda:
-            data, target = data.cuda(), target.cuda()
-        data, target = Variable(data, volatile=True), Variable(target)
+        data, target = data.to(device), target.to(device)
+        # if args.cuda:
+        #     data, target = data.cuda(), target.cuda()
+        # data, target = Variable(data, volatile=True), Variable(target)
         output = model(data)
-        pred = output.data.max(1, keepdim=True)[1] # get the index of the max log-probability
+        pred = output.max(1, keepdim=True)[1] # get the index of the max log-probability
         correct += pred.eq(target.data.view_as(pred)).cpu().sum()
 
     print('\nTest set: Accuracy: {}/{} ({:.1f}%)\n'.format(
@@ -108,7 +112,7 @@ test()
 # Make real prune
 print(cfg)
 newmodel = vgg(cfg=cfg)
-newmodel.cuda()
+newmodel.to(device)
 
 layer_id_in_cfg = 0
 start_mask = torch.ones(3)
@@ -128,7 +132,9 @@ for [m0, m1] in zip(model.modules(), newmodel.modules()):
         idx0 = np.squeeze(np.argwhere(np.asarray(start_mask.cpu().numpy())))
         idx1 = np.squeeze(np.argwhere(np.asarray(end_mask.cpu().numpy())))
         print('In shape: {:d} Out shape:{:d}'.format(idx0.shape[0], idx1.shape[0]))
+        # keep channels depend on prev layer output
         w = m0.weight.data[:, idx0, :, :].clone()
+        # keep filters depend on next layer input
         w = w[idx1, :, :, :].clone()
         m1.weight.data = w.clone()
         # m1.bias.data = m0.bias.data[idx1].clone()
